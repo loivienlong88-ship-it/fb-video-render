@@ -1,0 +1,68 @@
+name: Render video
+
+on:
+  workflow_dispatch:
+    inputs:
+      payload:
+        description: "Kịch bản JSON (base64) do Make gửi sang"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: render
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cài thư viện
+        run: |
+          tar xzf bundle.tar.gz
+          pip install -r requirements.txt
+          which ffmpeg || (sudo apt-get update && sudo apt-get install -y ffmpeg)
+          mkdir -p fonts
+          curl -fsSL -o fonts/BeVietnamPro-ExtraBold.ttf \
+            https://github.com/google/fonts/raw/main/ofl/bevietnampro/BeVietnamPro-ExtraBold.ttf
+
+      - name: Dựng video
+        env:
+          PAYLOAD: ${{ inputs.payload }}
+          FONT_NAME: Be Vietnam Pro
+        run: python render.py
+
+      - name: Đăng file video (GitHub Release)
+        id: rel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v$(date -u +%Y%m%d-%H%M%S)-${{ github.run_id }}"
+          gh release create "$TAG" out/video.mp4 --title "$TAG" --notes "Video tự động" --latest=false
+          echo "url=https://github.com/${{ github.repository }}/releases/download/$TAG/video.mp4" >> "$GITHUB_OUTPUT"
+
+      - name: Báo kết quả về Make
+        if: always()
+        env:
+          MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
+          PAYLOAD: ${{ inputs.payload }}
+          VIDEO_URL: ${{ steps.rel.outputs.url }}
+          JOB_STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python callback.py
+
+      - name: Dọn video cũ (giữ 30 bản mới nhất)
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list --limit 200 --json tagName,createdAt -q 'sort_by(.createdAt) | reverse | .[30:] | .[].tagName' |
+            while read -r t; do gh release delete "$t" --yes --cleanup-tag || true; done
